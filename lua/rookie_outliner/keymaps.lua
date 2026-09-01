@@ -1,7 +1,7 @@
 local M = {}
 
 function M.setup()
-    vim.keymap.set("x", "<leader>o", ":<C-u>RkOutlinerDraw<CR>", {
+    vim.keymap.set("x", "<leader>o", "<Cmd>RkOutlinerDraw<CR>", {
         silent = true,
         desc = "rookie_outliner: draw",
     })

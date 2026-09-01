@@ -33,10 +33,15 @@ local function get_byte_idx_for_vcol(line_str, target_vcol)
 end
 
 local function draw_virtual_box()
-    -- Get visual selection range (Lines)
-    local start_mark = vim.fn.getpos("'<")
-    local end_mark = vim.fn.getpos("'>")
+    -- Detect mode to use correct marks
+    local mode = vim.api.nvim_get_mode().mode
+    local is_visual = mode:find("[vV\22]")
+
+    -- Get selection range
+    local start_mark = vim.fn.getpos(is_visual and "v" or "'<")
+    local end_mark = vim.fn.getpos(is_visual and "." or "'>")
     if start_mark[2] == 0 or end_mark[2] == 0 then
+        vim.notify("rookie_outliner: No visual selection found", vim.log.levels.WARN)
         return
     end
 
@@ -46,99 +51,85 @@ local function draw_virtual_box()
     local srow = start_mark[2] - 1
     local erow = end_mark[2] - 1
 
-    -- Get virtual/display columns (Solves virtualedit & tab issues)
-    local vcol1 = vim.fn.virtcol("'<") - 1
-    local vcol2 = vim.fn.virtcol("'>") - 1
+    -- Get virtual/display columns
+    local vcol1 = vim.fn.virtcol(is_visual and "v" or "'<") - 1
+    local vcol2 = vim.fn.virtcol(is_visual and "." or "'>") - 1
 
-    -- Normalize direction
-    if srow > erow then
-        srow, erow = erow, srow
-    end
+    -- Normalize
+    if srow > erow then srow, erow = erow, srow end
     local scol_v = math.min(vcol1, vcol2)
     local ecol_v = math.max(vcol1, vcol2)
 
-    -- Handle case where ecol_v is very large (e.g. selection to end of line)
+    -- Handle large ecol_v (selection to $)
     local max_buf_len = 0
     for r = srow, erow do
         local line = vim.api.nvim_buf_get_lines(0, r, r + 1, false)[1] or ""
-        local len = vim.fn.strdisplaywidth(line)
-        if len > max_buf_len then
-            max_buf_len = len
-        end
+        max_buf_len = math.max(max_buf_len, vim.fn.strdisplaywidth(line))
     end
     if ecol_v > max_buf_len + 100 then
         ecol_v = max_buf_len + 1
     end
 
-    -- Extend boundaries by 1 in all directions
-    local orig_srow, orig_erow = srow, erow
-    srow = math.max(0, srow - 1)
-    scol_v = math.max(0, scol_v - 1)
-    ecol_v = ecol_v + 1
+    -- Boundary adjustments for the box (surrounding the selection)
+    local box_scol = math.max(0, scol_v - 1)
+    local box_ecol = ecol_v + 1
+    local width = math.max(0, box_ecol - box_scol - 1)
 
-    -- Prevent exceeding buffer length
-    local max_row = vim.api.nvim_buf_line_count(0) - 1
-    erow = math.min(max_row, erow + 1)
+    local top_str = "┌" .. string.rep("─", width) .. "┐"
+    local bot_str = "└" .. string.rep("─", width) .. "┘"
 
-    local width = math.max(0, ecol_v - scol_v - 1)
-    local top_border = "┌" .. string.rep("─", width) .. "┐"
-    local bot_border = "└" .. string.rep("─", width) .. "┘"
-
-    for row = srow, erow do
+    -- Helper to add side borders
+    local function add_side_borders(row)
         local line_str = vim.api.nvim_buf_get_lines(0, row, row + 1, false)[1] or ""
         local line_len = #line_str
 
-        if row == srow then
-            -- Top border overlay
-            local b_idx, vcol = get_byte_idx_for_vcol(line_str, scol_v)
-            local pad = string.rep(" ", scol_v - vcol)
-            local vpos = b_idx >= line_len and "eol" or "overlay"
+        local b_idx_l, vcol_l = get_byte_idx_for_vcol(line_str, box_scol)
+        local b_idx_r, vcol_r = get_byte_idx_for_vcol(line_str, box_ecol)
 
-            vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx, {
-                virt_text = { { pad .. top_border, "BoxBorderHL" } },
-                virt_text_pos = vpos,
-            })
-        elseif row == erow then
-            -- Bottom border overlay
-            local b_idx, vcol = get_byte_idx_for_vcol(line_str, scol_v)
-            local pad = string.rep(" ", scol_v - vcol)
-            local vpos = b_idx >= line_len and "eol" or "overlay"
-
-            vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx, {
-                virt_text = { { pad .. bot_border, "BoxBorderHL" } },
-                virt_text_pos = vpos,
+        if b_idx_l == b_idx_r then
+            -- Short line, both borders at the end
+            local pad = string.rep(" ", box_scol - vcol_l)
+            local mid = string.rep(" ", width)
+            vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_l, {
+                virt_text = { { pad .. "│" .. mid .. "│", "BoxBorderHL" } },
+                virt_text_pos = b_idx_l >= line_len and "eol" or "overlay",
             })
         else
-            -- Side borders overlay
-            local b_idx_left, vcol_left = get_byte_idx_for_vcol(line_str, scol_v)
-            local b_idx_right, vcol_right = get_byte_idx_for_vcol(line_str, ecol_v)
-
-            -- If both fall at the end of a short line, combine them into one overlay string
-            if b_idx_left == b_idx_right then
-                local pad = string.rep(" ", scol_v - vcol_left)
-                local mid_pad = string.rep(" ", math.max(0, ecol_v - scol_v - 1))
-                local vpos = b_idx_left >= line_len and "eol" or "overlay"
-                vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_left, {
-                    virt_text = { { pad .. "│" .. mid_pad .. "│", "BoxBorderHL" } },
-                    virt_text_pos = vpos,
-                })
-            else
-                local pad_left = string.rep(" ", scol_v - vcol_left)
-                local vpos_left = b_idx_left >= line_len and "eol" or "overlay"
-                vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_left, {
-                    virt_text = { { pad_left .. "│", "BoxBorderHL" } },
-                    virt_text_pos = vpos_left,
-                })
-
-                local pad_right = string.rep(" ", ecol_v - vcol_right)
-                local vpos_right = b_idx_right >= line_len and "eol" or "overlay"
-                vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_right, {
-                    virt_text = { { pad_right .. "│", "BoxBorderHL" } },
-                    virt_text_pos = vpos_right,
-                })
-            end
+            -- Left border
+            local pad_l = string.rep(" ", box_scol - vcol_l)
+            vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_l, {
+                virt_text = { { pad_l .. "│", "BoxBorderHL" } },
+                virt_text_pos = b_idx_l >= line_len and "eol" or "overlay",
+            })
+            -- Right border
+            local pad_r = string.rep(" ", box_ecol - vcol_r)
+            vim.api.nvim_buf_set_extmark(0, ns_id, row, b_idx_r, {
+                virt_text = { { pad_r .. "│", "BoxBorderHL" } },
+                virt_text_pos = b_idx_r >= line_len and "eol" or "overlay",
+            })
         end
     end
+
+    -- 1. Top Border (using virt_lines for zero-impact on text)
+    local top_pad = string.rep(" ", box_scol)
+    vim.api.nvim_buf_set_extmark(0, ns_id, srow, 0, {
+        virt_lines = { { { top_pad .. top_str, "BoxBorderHL" } } },
+        virt_lines_above = true,
+    })
+
+    -- 2. Side Borders
+    for row = srow, erow do
+        add_side_borders(row)
+    end
+
+    -- 3. Bottom Border
+    local bot_pad = string.rep(" ", box_scol)
+    vim.api.nvim_buf_set_extmark(0, ns_id, erow, 0, {
+        virt_lines = { { { bot_pad .. bot_str, "BoxBorderHL" } } },
+        virt_lines_above = false,
+    })
+
+    vim.notify("rookie_outliner: Box drawn", vim.log.levels.INFO)
 end
 
 -- Clear boxes command
